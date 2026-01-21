@@ -10,7 +10,7 @@
   hosts: localhost
   vars:
     # Переменные для роли Vector
-    clickhouse_host: "{{ hostvars['clickhouse-01'].private_ip }}"
+    clickhouse_host: "{{ hostvars[groups['my_local'][0]].ansible_host }}"
     clickhouse_port: 8123
     clickhouse_database: logs
     clickhouse_table: demo_logs
@@ -25,7 +25,7 @@
   hosts: localhost
   vars:
     # Переменные для роли Vector
-    clickhouse_host: "{{ hostvars['clickhouse-01'].private_ip }}"
+    clickhouse_host: "{{ hostvars[groups['my_local'][0]].ansible_host }}"
     clickhouse_port: 8123
     clickhouse_database: logs
     clickhouse_table: demo_logs
