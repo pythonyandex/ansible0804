@@ -1,0 +1,37 @@
+---
+- name: Install clickhouse on Ubuntu
+  hosts: localhost
+  roles:
+    - role: roles/clickhouse
+  tags: clickhouse
+
+
+- name: Install Vector on Ubuntu
+  hosts: localhost
+  vars:
+    # Переменные для роли Vector
+    clickhouse_host: "{{ hostvars['clickhouse-01'].private_ip }}"
+    clickhouse_port: 8123
+    clickhouse_database: logs
+    clickhouse_table: demo_logs
+    
+  roles:
+    - role: roles/vector
+  tags: vector
+
+
+
+- name: Install LightHouse on Ubuntu
+  hosts: localhost
+  vars:
+    # Переменные для роли Vector
+    clickhouse_host: "{{ hostvars['clickhouse-01'].private_ip }}"
+    clickhouse_port: 8123
+    clickhouse_database: logs
+    clickhouse_table: demo_logs
+
+  roles:
+    - role: roles/lighthouse
+  tags: lighthouse
+
+

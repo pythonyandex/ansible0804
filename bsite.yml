@@ -1,0 +1,221 @@
+---
+- name: Install ClickHouse on Ubuntu
+  hosts: localhost
+  handlers:
+    - name: Restart clickhouse service
+      become: true
+      ansible.builtin.service:
+        name: clickhouse-server
+        state: restarted
+
+  tasks:
+    - name: Install required packages for ClickHouse
+      become: true
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - gnupg
+          - curl
+        state: present
+        update_cache: yes
+
+    - name: Add ClickHouse GPG key
+      become: true
+      ansible.builtin.shell: |
+        curl -fsSL 'https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key' | sudo gpg --dearmor -o /usr/share/keyrings/clickhouse-keyring.gpg
+      args:
+        creates: /usr/share/keyrings/clickhouse-keyring.gpg
+
+    - name: Add ClickHouse repository
+      become: true
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg arch=amd64] https://packages.clickhouse.com/deb stable main"
+        state: present
+        update_cache: yes
+
+    - name: Install ClickHouse
+      become: true
+      ansible.builtin.apt:
+        name:
+          - clickhouse-server
+          - clickhouse-client
+        state: present
+        update_cache: yes
+      notify: Restart clickhouse service
+
+    - name: Wait for ClickHouse config to be created
+      become: true
+      ansible.builtin.wait_for:
+        path: /etc/clickhouse-server/config.xml
+        state: present
+        timeout: 30
+
+    - name: Configure ClickHouse for external access
+      become: true
+      ansible.builtin.blockinfile:
+        path: /etc/clickhouse-server/config.xml
+        marker: "# {mark} ANSIBLE MANAGED BLOCK: External access"
+        block: |
+          <!-- Listen on all interfaces -->
+          <listen_host>0.0.0.0</listen_host>
+        insertafter: "<interserver_http_port>9009</interserver_http_port>"
+      notify: Restart clickhouse service
+
+    - name: Flush handlers
+      meta: flush_handlers
+
+    - name: Create database
+      ansible.builtin.shell: |
+        sleep 5
+        clickhouse-client -q 'create database if not exists logs;' 2>/dev/null || true
+      register: create_db
+      changed_when: "'already exists' not in create_db.stderr"
+
+    - name: Create demo_logs table
+      ansible.builtin.shell: |
+        clickhouse-client -d logs -q "
+        CREATE TABLE IF NOT EXISTS demo_logs (
+            timestamp DateTime,
+            appname String,
+            facility String,
+            hostname String,
+            message String,
+            msgid String,
+            procid UInt32,
+            severity String,
+            version UInt8
+        ) ENGINE = MergeTree()
+        ORDER BY timestamp" 2>/dev/null || true
+      register: create_table
+      changed_when: "'already exists' not in create_table.stderr"
+
+- name: Install Vector on Ubuntu
+  hosts: localhost
+  vars:
+    # Переменные для роли Vector
+    clickhouse_host: "{{ hostvars['clickhouse-01'].private_ip }}"
+    clickhouse_port: 8123
+    clickhouse_database: logs
+    clickhouse_table: demo_logs
+    
+  roles:
+    - role: roles/vector
+  tags: vector
+
+
+- name: Install nginx and lighthouse
+  hosts: localhost
+  vars:
+    nginx_user: www-data
+    lighthouse_local_dir: /var/www/lighthouse
+  handlers:
+    - name: Reload nginx
+      become: true
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
+    
+    - name: Restart nginx
+      become: true
+      ansible.builtin.service:
+        name: nginx
+        state: restarted
+
+  tasks:
+    - name: NGINX | Install NGINX and dependencies
+      become: true
+      ansible.builtin.apt:
+        name:
+          - nginx
+          - curl
+          - wget
+          - unzip
+          - git
+        state: present
+        update_cache: yes
+
+    - name: NGINX | Create general config
+      become: true
+      ansible.builtin.template:
+        src: templates/nginx.conf.j2
+        dest: /etc/nginx/nginx.conf
+        mode: "0644"
+      notify: Restart nginx
+
+    - name: Create lighthouse directory
+      become: true
+      ansible.builtin.file:
+        path: "{{ lighthouse_local_dir }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ nginx_user }}"
+        group: "{{ nginx_user }}"
+
+    - name: Check if Lighthouse already exists
+      ansible.builtin.stat:
+        path: "{{ lighthouse_local_dir }}/index.html"
+      register: lighthouse_exists
+
+    - name: Download Lighthouse archive
+      ansible.builtin.get_url:
+        url: "https://github.com/VKCOM/lighthouse/archive/refs/heads/master.zip"
+        dest: /tmp/lighthouse.zip
+        mode: '0644'
+      when: not lighthouse_exists.stat.exists
+
+    - name: Extract Lighthouse
+      become: true
+      ansible.builtin.unarchive:
+        src: /tmp/lighthouse.zip
+        dest: /tmp/
+        remote_src: yes
+        creates: /tmp/lighthouse-master/
+      when: not lighthouse_exists.stat.exists
+
+    - name: Copy Lighthouse files to target directory
+      become: true
+      ansible.builtin.copy:
+        src: /tmp/lighthouse-master/
+        dest: "{{ lighthouse_local_dir }}"
+        owner: "{{ nginx_user }}"
+        group: "{{ nginx_user }}"
+        mode: '0755'
+        remote_src: yes
+      when: not lighthouse_exists.stat.exists
+
+    - name: Set proper permissions for Lighthouse
+      become: true
+      ansible.builtin.file:
+        path: "{{ lighthouse_local_dir }}"
+        owner: "{{ nginx_user }}"
+        group: "{{ nginx_user }}"
+        recurse: yes
+
+    - name: Configure Nginx for Lighthouse
+      become: true
+      ansible.builtin.template:
+        src: templates/lighthouse.conf.j2
+        dest: /etc/nginx/conf.d/lighthouse.conf
+        mode: '0644'
+      notify: Reload nginx
+
+    - name: Remove default nginx config
+      become: true
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload nginx
+
+    - name: Validate nginx configuration
+      become: true
+      ansible.builtin.shell: |
+        nginx -t
+      changed_when: false
+
+    - name: Start and enable Nginx
+      become: true
+      ansible.builtin.systemd:
+        name: nginx
+        state: started
+        enabled: yes
